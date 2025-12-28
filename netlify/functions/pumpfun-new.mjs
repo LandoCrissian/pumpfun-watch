@@ -1,54 +1,65 @@
-export default async (req) => {
+export default async () => {
   try {
-    // Pump.fun URLs vary. If this 404s, swap to the correct "new" page you use.
-    // Examples people often use: https://pump.fun/ or https://pump.fun/board or similar.
     const PUMP_NEW_URL = "https://pump.fun/";
 
     const r = await fetch(PUMP_NEW_URL, {
       headers: {
+        // Keep it very “browser-like”
         "user-agent":
-          "Mozilla/5.0 (compatible; JackpotWatch/1.0; +https://jackpotcoin.fun)",
-        "accept": "text/html,application/xhtml+xml",
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "accept":
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+        "cache-control": "no-cache",
+        "pragma": "no-cache",
       },
     });
 
-    if (!r.ok) {
-      return json(502, { error: `Pump fetch failed: ${r.status}` });
-    }
+    if (!r.ok) return json(502, { error: `Pump fetch failed: ${r.status}` });
 
     const html = await r.text();
 
-    // --- Extraction helpers ---
-    const unique = (arr) => [...new Set(arr)];
+    // If pump serves a “shell” with basically no content, we’ll detect it
+    const looksEmptyShell =
+      html.length < 5000 || (!html.includes("pump") && !html.includes("__NEXT") && !html.includes("react"));
 
     // Base58-ish Solana pubkey regex (32-44 chars)
-    // NOTE: This can catch non-mint addresses too, but it's a good fallback.
     const base58Re = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
 
-    // 1) Try to find JSON-ish embedded data containing "mint" or "token" fields
-    // We keep this simple: look for occurrences of `"mint":"<base58>"`
+    // Common embedded fields that sometimes contain mints
     const mintFieldRe = /"mint"\s*:\s*"([1-9A-HJ-NP-Za-km-z]{32,44})"/g;
-    const mintsFromMintField = [];
-    for (const m of html.matchAll(mintFieldRe)) mintsFromMintField.push(m[1]);
+    const addressFieldRe = /"address"\s*:\s*"([1-9A-HJ-NP-Za-km-z]{32,44})"/g;
 
-    // Sometimes "address" is used
-    const addrFieldRe = /"address"\s*:\s*"([1-9A-HJ-NP-Za-km-z]{32,44})"/g;
-    const mintsFromAddrField = [];
-    for (const m of html.matchAll(addrFieldRe)) mintsFromAddrField.push(m[1]);
+    const mintsFromFields = [];
+    for (const m of html.matchAll(mintFieldRe)) mintsFromFields.push(m[1]);
+    for (const m of html.matchAll(addressFieldRe)) mintsFromFields.push(m[1]);
 
-    // 2) Fallback: any base58-looking keys
     const allKeys = html.match(base58Re) || [];
 
-    // Combine + de-dupe
-    const mints = unique([...mintsFromMintField, ...mintsFromAddrField, ...allKeys]).slice(0, 200);
+    const unique = (arr) => [...new Set(arr)];
+    const mints = unique([...mintsFromFields, ...allKeys]).slice(0, 200);
 
-    // Shape into token items (MVP)
-    // Later we enrich with pump metadata, socials, etc.
+    // If we got basically nothing, return a helpful note (don’t break UI)
+    if (mints.length < 5) {
+      return json(200, {
+        updatedUTC: new Date().toISOString(),
+        count: 0,
+        items: [],
+        note: looksEmptyShell
+          ? "Pump.fun returned a client-side shell (no mints in HTML). Next step: switch to their underlying JSON/api endpoint if available."
+          : "Pump.fun HTML fetched, but we couldn’t extract enough mints. Markup likely changed.",
+        debug: {
+          htmlBytes: html.length,
+          extractedMints: mints.length,
+        },
+      });
+    }
+
     const items = mints.map((mint) => ({
       mint,
       pumpUrl: `https://pump.fun/${mint}`,
       firstSeenUTC: new Date().toISOString(),
-      source: "pumpfun-scrape",
+      source: mintsFromFields.includes(mint) ? "embedded-json" : "html-fallback",
     }));
 
     return json(200, {
@@ -56,7 +67,7 @@ export default async (req) => {
       count: items.length,
       items,
       note:
-        "MVP scrape: results may include non-mint keys until enrichment/scoring is added. Next step is on-chain verify + filter.",
+        "MVP feed. Next we enrich each mint on-chain + apply scam filters (bundles/snipers/concentration).",
     });
   } catch (e) {
     return json(500, { error: String(e?.message || e) });
