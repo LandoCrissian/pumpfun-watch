@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pump.fun Watch (by Jackpot)</title>
+  <meta name="theme-color" content="#070A0F" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="topbar">
+    <div class="wrap">
+      <div class="header">
+        <div class="brand">
+          <img class="logo" src="https://raw.githubusercontent.com/LandoCrissian/Jackpot-Coin/refs/heads/main/IMG_9059.jpeg" alt="Jackpot" />
+          <div class="brandText">
+            <h1>Pump.fun Watch</h1>
+            <p>We only list tokens that pass the current checks. Proof-first. No vibes.</p>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center">
+          <a class="btn" href="https://www.jackpotcoin.fun/" target="_blank" rel="noopener">Jackpot ↗</a>
+          <button class="btn btnPrimary" id="refreshBtn" type="button">Refresh</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="card cardGlow" style="margin-top:14px;">
+      <div class="kicker"><span class="dot"></span> MVP: Pump.fun scrape • On-chain verification next</div>
+      <div class="h2">Newest tokens (raw feed)</div>
+      <p class="sub">Tonight we ship the feed + UI. Next we add the scoring engine to filter “clean”.</p>
+
+      <div class="controls">
+        <input class="input" id="search" placeholder="Search mint…" />
+        <select class="select" id="sort">
+          <option value="newest">Sort: newest seen</option>
+          <option value="alpha">Sort: A → Z</option>
+        </select>
+        <select class="select" id="limit">
+          <option value="50">Show 50</option>
+          <option value="100">Show 100</option>
+          <option value="200">Show 200</option>
+        </select>
+      </div>
+
+      <div class="foot" id="statusLine">Loading…</div>
+    </div>
+
+    <div class="grid" id="list"></div>
+
+    <div class="foot">
+      Disclaimer: This is not financial advice. This tool shows *observations and heuristics* — no guarantees.
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
