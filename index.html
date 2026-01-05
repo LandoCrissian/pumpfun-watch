@@ -1,60 +1,1259 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Pump.fun Watch (by Jackpot)</title>
-  <meta name="theme-color" content="#070A0F" />
-  <link rel="stylesheet" href="./styles.css" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0a0a0a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="VERDICT - Ruthless token analysis for traders. One screen. One decision.">
+  <title>VERDICT - Token Analysis</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%230a0a0a' width='100' height='100'/><text y='.9em' font-size='90'>⚖️</text></svg>">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap');
+    
+    * {
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+    }
+    
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: #0a0a0a;
+      overscroll-behavior: none;
+    }
+    
+    .mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    
+    .verdict-enter { background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%); }
+    .verdict-wait { background: linear-gradient(135deg, #eab308 0%, #ca8a04 100%); }
+    .verdict-ignore { background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%); }
+    .verdict-exit { background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); }
+    
+    .verdict-text-enter { color: #22c55e; }
+    .verdict-text-wait { color: #eab308; }
+    .verdict-text-ignore { color: #6b7280; }
+    .verdict-text-exit { color: #ef4444; }
+    
+    .pulse-ring {
+      animation: pulse-ring 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    
+    @keyframes pulse-ring {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.05); }
+    }
+    
+    .skeleton {
+      background: linear-gradient(90deg, #1f1f1f 25%, #2a2a2a 50%, #1f1f1f 75%);
+      background-size: 200% 100%;
+      animation: skeleton-loading 1.5s infinite;
+    }
+    
+    @keyframes skeleton-loading {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    
+    .tap-feedback:active {
+      transform: scale(0.97);
+      opacity: 0.9;
+    }
+    
+    .slide-up {
+      animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    
+    @keyframes slideUp {
+      from { transform: translateY(20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    
+    .fade-in {
+      animation: fadeIn 0.3s ease-out;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    
+    .toast {
+      animation: toastIn 0.3s ease-out, toastOut 0.3s ease-in 2s forwards;
+    }
+    
+    @keyframes toastIn {
+      from { transform: translateY(100%); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    
+    @keyframes toastOut {
+      from { transform: translateY(0); opacity: 1; }
+      to { transform: translateY(100%); opacity: 0; }
+    }
+    
+    .bottom-sheet {
+      animation: sheetUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    
+    @keyframes sheetUp {
+      from { transform: translateY(100%); }
+      to { transform: translateY(0); }
+    }
+    
+    input::placeholder {
+      color: #525252;
+    }
+    
+    .safe-bottom {
+      padding-bottom: max(1rem, env(safe-area-inset-bottom));
+    }
+    
+    .scrollbar-hide::-webkit-scrollbar {
+      display: none;
+    }
+    
+    .scrollbar-hide {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+  </style>
 </head>
-<body>
-  <div class="topbar">
-    <div class="wrap">
-      <div class="header">
-        <div class="brand">
-          <img class="logo" src="https://raw.githubusercontent.com/LandoCrissian/Jackpot-Coin/refs/heads/main/IMG_9059.jpeg" alt="Jackpot" />
-          <div class="brandText">
-            <h1>Pump.fun Watch</h1>
-            <p>We only list tokens that pass the current checks. Proof-first. No vibes.</p>
+<body class="min-h-screen bg-neutral-950 text-white antialiased">
+  <div id="app"></div>
+  
+  <script>
+    // ============================================
+    // TYPES & CONSTANTS
+    // ============================================
+    const VERDICTS = {
+      ENTER: { label: 'ENTER', color: 'enter', description: 'Strong setup. Consider position.' },
+      WAIT: { label: 'WAIT', color: 'wait', description: 'Opportunity exists. Timing unclear.' },
+      IGNORE: { label: 'IGNORE', color: 'ignore', description: 'Not worth your attention.' },
+      EXIT: { label: 'EXIT', color: 'exit', description: 'Danger signals. Avoid or exit.' }
+    };
+    
+    const CONFIDENCE_LEVELS = {
+      HIGH: { label: 'HIGH', color: 'text-green-400' },
+      MEDIUM: { label: 'MEDIUM', color: 'text-yellow-400' },
+      LOW: { label: 'LOW', color: 'text-orange-400' }
+    };
+    
+    // ============================================
+    // DATA ADAPTERS (Simulated API Layer)
+    // ============================================
+    const cache = new Map();
+    const CACHE_TTL = 30000; // 30 seconds
+    const rateLimitMap = new Map();
+    const RATE_LIMIT_WINDOW = 60000; // 1 minute
+    const RATE_LIMIT_MAX = 10;
+    
+    function checkRateLimit(ip = 'local') {
+      const now = Date.now();
+      const userLimits = rateLimitMap.get(ip) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW };
+      
+      if (now > userLimits.resetAt) {
+        userLimits.count = 0;
+        userLimits.resetAt = now + RATE_LIMIT_WINDOW;
+      }
+      
+      if (userLimits.count >= RATE_LIMIT_MAX) {
+        return false;
+      }
+      
+      userLimits.count++;
+      rateLimitMap.set(ip, userLimits);
+      return true;
+    }
+    
+    function getCached(key) {
+      const cached = cache.get(key);
+      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+        return cached.data;
+      }
+      return null;
+    }
+    
+    function setCache(key, data) {
+      cache.set(key, { data, timestamp: Date.now() });
+    }
+    
+    // Helius Adapter (Solana) - Real API structure, simulated response for demo
+    async function fetchHeliusData(tokenAddress) {
+      const cacheKey = `helius_${tokenAddress}`;
+      const cached = getCached(cacheKey);
+      if (cached) return cached;
+      
+      // In production, this would be:
+      // const response = await fetch(`https://api.helius.xyz/v0/tokens/${tokenAddress}?api-key=${process.env.HELIUS_API_KEY}`);
+      
+      // Simulated response based on address characteristics
+      await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
+      
+      const addressHash = tokenAddress.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+      const variance = (addressHash % 100) / 100;
+      
+      const data = {
+        success: true,
+        source: 'helius',
+        tokenInfo: {
+          supply: 1000000000,
+          decimals: 9,
+          holders: Math.floor(500 + variance * 5000),
+          price: 0.00001 + variance * 0.001,
+          priceChange24h: -20 + variance * 60,
+          volume24h: 50000 + variance * 500000,
+          liquidity: 20000 + variance * 200000,
+          marketCap: 100000 + variance * 1000000,
+        },
+        holderDistribution: {
+          top10Percent: 30 + variance * 40,
+          top50Percent: 60 + variance * 30,
+          uniqueBuyers24h: Math.floor(50 + variance * 500),
+          uniqueSellers24h: Math.floor(30 + variance * 300),
+        },
+        transactions: {
+          count24h: Math.floor(200 + variance * 2000),
+          avgSize: 100 + variance * 500,
+          sizeVariance: 0.3 + variance * 0.5,
+          suspiciousPatterns: variance > 0.7 ? ['circular_trading', 'identical_amounts'] : [],
+        },
+        metadata: {
+          name: `Token ${tokenAddress.slice(0, 6)}`,
+          symbol: tokenAddress.slice(0, 4).toUpperCase(),
+          createdAt: Date.now() - (variance * 30 * 24 * 60 * 60 * 1000),
+          lastActivity: Date.now() - (variance * 60 * 60 * 1000),
+        }
+      };
+      
+      setCache(cacheKey, data);
+      return data;
+    }
+    
+    // Birdeye Adapter (backup/supplementary)
+    async function fetchBirdeyeData(tokenAddress) {
+      const cacheKey = `birdeye_${tokenAddress}`;
+      const cached = getCached(cacheKey);
+      if (cached) return cached;
+      
+      await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+      
+      const addressHash = tokenAddress.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+      const variance = (addressHash % 100) / 100;
+      
+      const data = {
+        success: true,
+        source: 'birdeye',
+        socialSignals: {
+          twitterMentions24h: Math.floor(variance * 500),
+          telegramActivity: variance > 0.5 ? 'high' : 'low',
+          narrativeFlags: variance > 0.8 ? ['sudden_hype', 'coordinated_shilling'] : [],
+        },
+        liquidityData: {
+          depth: variance > 0.4 ? 'adequate' : 'shallow',
+          lpLocked: variance > 0.6,
+          lpLockDuration: variance > 0.6 ? Math.floor(30 + variance * 335) : 0,
+        },
+        devActivity: {
+          lastDevTx: Date.now() - (variance * 7 * 24 * 60 * 60 * 1000),
+          devWalletSells: variance > 0.7 ? Math.floor(variance * 5) : 0,
+          teamChanges: variance > 0.85,
+        }
+      };
+      
+      setCache(cacheKey, data);
+      return data;
+    }
+    
+    // Aggregated signal fetcher with graceful degradation
+    async function fetchAllSignals(tokenAddress) {
+      const results = await Promise.allSettled([
+        fetchHeliusData(tokenAddress),
+        fetchBirdeyeData(tokenAddress)
+      ]);
+      
+      const signals = {
+        helius: results[0].status === 'fulfilled' ? results[0].value : null,
+        birdeye: results[1].status === 'fulfilled' ? results[1].value : null,
+        dataQuality: 'full',
+        timestamp: Date.now()
+      };
+      
+      if (!signals.helius && !signals.birdeye) {
+        signals.dataQuality = 'none';
+      } else if (!signals.helius || !signals.birdeye) {
+        signals.dataQuality = 'partial';
+      }
+      
+      return signals;
+    }
+    
+    // ============================================
+    // ANALYSIS MODULES
+    // ============================================
+    
+    // Module 1: Worth My Time Filter
+    function runWorthMyTimeModule(signals) {
+      const reasons = [];
+      const flags = [];
+      let score = 50;
+      let confidence = 0.5;
+      
+      if (!signals.helius) {
+        return { score: 20, confidence: 0.2, reasons: ['Insufficient data'], flags: ['data_unavailable'] };
+      }
+      
+      const { tokenInfo, holderDistribution, transactions } = signals.helius;
+      
+      // Volume check
+      if (tokenInfo.volume24h > 100000) {
+        score += 15;
+        reasons.push('Decent 24h volume');
+      } else if (tokenInfo.volume24h < 10000) {
+        score -= 20;
+        reasons.push('Very low volume');
+        flags.push('low_volume');
+      }
+      
+      // Holder count
+      if (holderDistribution && tokenInfo.holders > 1000) {
+        score += 10;
+        reasons.push('Good holder base');
+      } else if (tokenInfo.holders < 100) {
+        score -= 15;
+        reasons.push('Too few holders');
+        flags.push('low_holders');
+      }
+      
+      // Liquidity check
+      if (tokenInfo.liquidity > 50000) {
+        score += 10;
+        confidence += 0.1;
+      } else if (tokenInfo.liquidity < 10000) {
+        score -= 15;
+        flags.push('shallow_liquidity');
+        reasons.push('Shallow liquidity');
+      }
+      
+      // Transaction activity
+      if (transactions && transactions.count24h > 500) {
+        score += 10;
+        reasons.push('Active trading');
+      }
+      
+      return {
+        score: Math.max(0, Math.min(100, score)),
+        confidence: Math.min(1, confidence + 0.3),
+        reasons,
+        flags
+      };
+    }
+    
+    // Module 2: Fake Move Detector
+    function runFakeMoveModule(signals) {
+      const reasons = [];
+      const flags = [];
+      let score = 70; // Higher = more organic, lower = more fake
+      let confidence = 0.5;
+      
+      if (!signals.helius) {
+        return { score: 50, confidence: 0.2, reasons: ['Cannot verify authenticity'], flags: ['unverified'] };
+      }
+      
+      const { transactions, holderDistribution } = signals.helius;
+      
+      // Check for suspicious patterns
+      if (transactions.suspiciousPatterns && transactions.suspiciousPatterns.length > 0) {
+        score -= 25 * transactions.suspiciousPatterns.length;
+        flags.push(...transactions.suspiciousPatterns);
+        reasons.push('Detected suspicious trading patterns');
+        confidence += 0.2;
+      }
+      
+      // Size variance (organic = high variance)
+      if (transactions.sizeVariance < 0.3) {
+        score -= 20;
+        reasons.push('Uniform transaction sizes (bot-like)');
+        flags.push('uniform_tx_sizes');
+      } else if (transactions.sizeVariance > 0.6) {
+        score += 10;
+        reasons.push('Natural variance in buyer sizes');
+      }
+      
+      // Buyer/seller ratio
+      if (holderDistribution) {
+        const buyerSellerRatio = holderDistribution.uniqueBuyers24h / (holderDistribution.uniqueSellers24h || 1);
+        if (buyerSellerRatio > 3) {
+          score += 10;
+          reasons.push('Fresh buyers outpacing sellers');
+        } else if (buyerSellerRatio < 0.5) {
+          score -= 15;
+          reasons.push('More sellers than buyers');
+          flags.push('selling_pressure');
+        }
+      }
+      
+      // Social vs on-chain mismatch
+      if (signals.birdeye) {
+        const { socialSignals } = signals.birdeye;
+        if (socialSignals.narrativeFlags && socialSignals.narrativeFlags.includes('coordinated_shilling')) {
+          score -= 20;
+          flags.push('coordinated_shilling');
+          reasons.push('Social hype without on-chain support');
+        }
+      }
+      
+      return {
+        score: Math.max(0, Math.min(100, score)),
+        confidence: Math.min(1, confidence + 0.3),
+        reasons,
+        flags
+      };
+    }
+    
+    // Module 3: Too Late Engine
+    function runTooLateModule(signals) {
+      const reasons = [];
+      const flags = [];
+      let score = 50; // Higher = still early, lower = too late
+      let confidence = 0.5;
+      
+      if (!signals.helius) {
+        return { score: 50, confidence: 0.2, reasons: ['Cannot determine timing'], flags: [] };
+      }
+      
+      const { tokenInfo, holderDistribution, metadata } = signals.helius;
+      
+      // Price performance
+      if (tokenInfo.priceChange24h > 100) {
+        score -= 30;
+        reasons.push('Already pumped significantly');
+        flags.push('post_pump');
+      } else if (tokenInfo.priceChange24h > 50) {
+        score -= 15;
+        reasons.push('Recent strong move up');
+      } else if (tokenInfo.priceChange24h < -30) {
+        score += 10;
+        reasons.push('Pulled back from highs');
+      }
+      
+      // Holder concentration (distribution started?)
+      if (holderDistribution && holderDistribution.top10Percent > 60) {
+        score -= 20;
+        reasons.push('Heavy concentration in top holders');
+        flags.push('concentrated_holdings');
+      } else if (holderDistribution && holderDistribution.top10Percent < 30) {
+        score += 15;
+        reasons.push('Well-distributed holder base');
+      }
+      
+      // Token age
+      if (metadata) {
+        const ageInDays = (Date.now() - metadata.createdAt) / (24 * 60 * 60 * 1000);
+        if (ageInDays < 3) {
+          score += 10;
+          reasons.push('Fresh token, early stage');
+          confidence -= 0.1; // Less data = less confidence
+        } else if (ageInDays > 30 && tokenInfo.priceChange24h > 50) {
+          score -= 10;
+          reasons.push('Older token with sudden pump');
+          flags.push('late_stage_pump');
+        }
+      }
+      
+      // Check dev selling
+      if (signals.birdeye && signals.birdeye.devActivity) {
+        if (signals.birdeye.devActivity.devWalletSells > 0) {
+          score -= 25;
+          reasons.push('Dev wallet selling detected');
+          flags.push('dev_selling');
+        }
+      }
+      
+      return {
+        score: Math.max(0, Math.min(100, score)),
+        confidence: Math.min(1, confidence + 0.3),
+        reasons,
+        flags
+      };
+    }
+    
+    // Module 4: Dead vs Sleeping
+    function runDeadVsSleepingModule(signals) {
+      const reasons = [];
+      const flags = [];
+      let score = 50;
+      let confidence = 0.5;
+      
+      if (!signals.helius) {
+        return { score: 50, confidence: 0.2, reasons: ['Insufficient activity data'], flags: [] };
+      }
+      
+      const { tokenInfo, transactions, metadata } = signals.helius;
+      
+      // Activity check
+      if (transactions.count24h < 50) {
+        // Low activity - is it dead or sleeping?
+        if (tokenInfo.liquidity > 30000) {
+          score = 60;
+          reasons.push('Quiet but liquidity intact');
+          reasons.push('Potential accumulation phase');
+        } else {
+          score = 30;
+          reasons.push('Low activity, weak liquidity');
+          flags.push('possibly_dead');
+        }
+      } else {
+        score = 70;
+        reasons.push('Active trading');
+      }
+      
+      // Recent activity spike
+      if (metadata && metadata.lastActivity) {
+        const hoursSinceActivity = (Date.now() - metadata.lastActivity) / (60 * 60 * 1000);
+        if (hoursSinceActivity < 1) {
+          score += 15;
+          reasons.push('Very recent activity');
+        } else if (hoursSinceActivity > 24) {
+          score -= 10;
+          reasons.push('No activity in 24+ hours');
+        }
+      }
+      
+      // LP lock check
+      if (signals.birdeye && signals.birdeye.liquidityData) {
+        if (signals.birdeye.liquidityData.lpLocked) {
+          score += 10;
+          reasons.push('LP locked');
+          confidence += 0.1;
+        } else {
+          flags.push('lp_unlocked');
+        }
+      }
+      
+      return {
+        score: Math.max(0, Math.min(100, score)),
+        confidence: Math.min(1, confidence + 0.2),
+        reasons,
+        flags
+      };
+    }
+    
+    // Module 5: Holder Psychology
+    function runHolderPsychologyModule(signals) {
+      const reasons = [];
+      const flags = [];
+      let score = 50;
+      let confidence = 0.4;
+      
+      if (!signals.helius || !signals.helius.holderDistribution) {
+        return { score: 50, confidence: 0.2, reasons: ['Limited holder data'], flags: [] };
+      }
+      
+      const { holderDistribution, transactions } = signals.helius;
+      
+      // Buyer vs seller dynamics
+      const buyerRatio = holderDistribution.uniqueBuyers24h / (holderDistribution.uniqueBuyers24h + holderDistribution.uniqueSellers24h);
+      
+      if (buyerRatio > 0.7) {
+        score += 20;
+        reasons.push('Strong accumulation pattern');
+        reasons.push('Diamond hands forming');
+      } else if (buyerRatio > 0.55) {
+        score += 10;
+        reasons.push('Slight buying pressure');
+      } else if (buyerRatio < 0.4) {
+        score -= 20;
+        reasons.push('Holder distribution ongoing');
+        flags.push('distribution_phase');
+      }
+      
+      // Transaction size analysis
+      if (transactions.avgSize > 500) {
+        reasons.push('Large average position sizes');
+        confidence += 0.1;
+      } else if (transactions.avgSize < 50) {
+        reasons.push('Small retail-heavy trades');
+      }
+      
+      // Flipper detection
+      if (holderDistribution.uniqueSellers24h > holderDistribution.uniqueBuyers24h * 0.8) {
+        score -= 10;
+        reasons.push('High flipper activity');
+        flags.push('flipper_heavy');
+      }
+      
+      return {
+        score: Math.max(0, Math.min(100, score)),
+        confidence: Math.min(1, confidence + 0.2),
+        reasons,
+        flags
+      };
+    }
+    
+    // Module 6: Rug Narrative Scan
+    function runRugNarrativeModule(signals) {
+      const reasons = [];
+      const flags = [];
+      let score = 70; // Higher = safer
+      let confidence = 0.5;
+      
+      // Check for major red flags
+      if (signals.birdeye) {
+        const { liquidityData, devActivity, socialSignals } = signals.birdeye;
+        
+        // LP not locked
+        if (liquidityData && !liquidityData.lpLocked) {
+          score -= 20;
+          reasons.push('Liquidity not locked');
+          flags.push('lp_not_locked');
+        }
+        
+        // Dev activity red flags
+        if (devActivity) {
+          if (devActivity.devWalletSells > 2) {
+            score -= 30;
+            reasons.push('Multiple dev wallet sells');
+            flags.push('dev_dumping');
+          }
+          if (devActivity.teamChanges) {
+            score -= 15;
+            reasons.push('Recent team/mod changes');
+            flags.push('team_instability');
+          }
+        }
+        
+        // Social red flags
+        if (socialSignals && socialSignals.narrativeFlags) {
+          if (socialSignals.narrativeFlags.includes('sudden_hype')) {
+            score -= 10;
+            reasons.push('Sudden coordinated hype');
+            flags.push('coordinated_marketing');
+          }
+        }
+      }
+      
+      // On-chain red flags
+      if (signals.helius) {
+        const { holderDistribution, tokenInfo } = signals.helius;
+        
+        if (holderDistribution && holderDistribution.top10Percent > 70) {
+          score -= 25;
+          reasons.push('Extreme holder concentration');
+          flags.push('whale_dominated');
+        }
+        
+        if (tokenInfo.liquidity < 5000) {
+          score -= 20;
+          reasons.push('Critically low liquidity');
+          flags.push('rug_risk_liquidity');
+        }
+      }
+      
+      if (score >= 60) {
+        reasons.push('No major rug signals detected');
+      }
+      
+      return {
+        score: Math.max(0, Math.min(100, score)),
+        confidence: Math.min(1, confidence + 0.2),
+        reasons,
+        flags
+      };
+    }
+    
+    // ============================================
+    // AGGREGATOR
+    // ============================================
+    function aggregateModules(moduleResults) {
+      const {
+        worthMyTime,
+        fakeMove,
+        tooLate,
+        deadVsSleeping,
+        holderPsychology,
+        rugNarrative
+      } = moduleResults;
+      
+      // Collect all flags
+      const allFlags = [
+        ...worthMyTime.flags,
+        ...fakeMove.flags,
+        ...tooLate.flags,
+        ...deadVsSleeping.flags,
+        ...holderPsychology.flags,
+        ...rugNarrative.flags
+      ];
+      const uniqueFlags = [...new Set(allFlags)];
+      
+      // Weighted scoring
+      const weightedScore = (
+        worthMyTime.score * 0.15 +
+        fakeMove.score * 0.25 +
+        tooLate.score * 0.2 +
+        deadVsSleeping.score * 0.1 +
+        holderPsychology.score * 0.15 +
+        rugNarrative.score * 0.15
+      );
+      
+      // Average confidence
+      const avgConfidence = (
+        worthMyTime.confidence +
+        fakeMove.confidence +
+        tooLate.confidence +
+        deadVsSleeping.confidence +
+        holderPsychology.confidence +
+        rugNarrative.confidence
+      ) / 6;
+      
+      // Determine verdict (conservative by default)
+      let verdict = 'IGNORE';
+      let timingNote = null;
+      
+      // Critical flags that force EXIT
+      const criticalFlags = ['dev_dumping', 'rug_risk_liquidity', 'whale_dominated', 'circular_trading'];
+      const hasCriticalFlag = uniqueFlags.some(f => criticalFlags.includes(f));
+      
+      if (hasCriticalFlag || rugNarrative.score < 40) {
+        verdict = 'EXIT';
+        timingNote = 'High risk detected. Preserve capital.';
+      } else if (weightedScore >= 70 && fakeMove.score >= 60 && !uniqueFlags.includes('post_pump')) {
+        verdict = 'ENTER';
+        timingNote = 'Setup looks favorable. Size appropriately.';
+      } else if (weightedScore >= 55 && tooLate.score >= 50) {
+        verdict = 'WAIT';
+        timingNote = 'Potential exists. Wait for better entry.';
+      } else if (weightedScore < 40 || worthMyTime.score < 35) {
+        verdict = 'IGNORE';
+        timingNote = 'Not worth your attention right now.';
+      } else {
+        verdict = 'WAIT';
+        timingNote = 'Mixed signals. Monitor for clarity.';
+      }
+      
+      // Determine confidence level
+      let confidence = 'LOW';
+      if (avgConfidence >= 0.7 && uniqueFlags.length <= 2) {
+        confidence = 'HIGH';
+      } else if (avgConfidence >= 0.5 && uniqueFlags.length <= 4) {
+        confidence = 'MEDIUM';
+      }
+      
+      // Build why bullets (top 5)
+      const allReasons = [
+        ...worthMyTime.reasons.map(r => ({ text: r, weight: worthMyTime.score })),
+        ...fakeMove.reasons.map(r => ({ text: r, weight: fakeMove.score })),
+        ...tooLate.reasons.map(r => ({ text: r, weight: tooLate.score })),
+        ...deadVsSleeping.reasons.map(r => ({ text: r, weight: deadVsSleeping.score })),
+        ...holderPsychology.reasons.map(r => ({ text: r, weight: holderPsychology.score })),
+        ...rugNarrative.reasons.map(r => ({ text: r, weight: rugNarrative.score }))
+      ];
+      
+      // Deduplicate and sort by weight
+      const seenReasons = new Set();
+      const whyBullets = allReasons
+        .filter(r => {
+          if (seenReasons.has(r.text)) return false;
+          seenReasons.add(r.text);
+          return true;
+        })
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, 5)
+        .map(r => r.text);
+      
+      // Add explicit risk note if confidence is low
+      if (confidence === 'LOW' && !whyBullets.some(b => b.includes('data') || b.includes('Insufficient'))) {
+        whyBullets.push('Limited data reduces confidence');
+      }
+      
+      return {
+        verdict,
+        confidence,
+        whyBullets,
+        riskFlags: uniqueFlags.slice(0, 6),
+        timingNote,
+        scores: {
+          overall: Math.round(weightedScore),
+          worthMyTime: worthMyTime.score,
+          fakeMove: fakeMove.score,
+          tooLate: tooLate.score,
+          deadVsSleeping: deadVsSleeping.score,
+          holderPsychology: holderPsychology.score,
+          rugNarrative: rugNarrative.score
+        }
+      };
+    }
+    
+    // Main analysis function
+    async function analyzeToken(tokenAddress) {
+      // Validate input
+      if (!tokenAddress || tokenAddress.length < 32) {
+        throw new Error('Invalid token address');
+      }
+      
+      // Check rate limit
+      if (!checkRateLimit()) {
+        throw new Error('Rate limit exceeded. Try again in a minute.');
+      }
+      
+      // Fetch signals
+      const signals = await fetchAllSignals(tokenAddress);
+      
+      if (signals.dataQuality === 'none') {
+        throw new Error('Unable to fetch token data. Check address and try again.');
+      }
+      
+      // Run all modules
+      const moduleResults = {
+        worthMyTime: runWorthMyTimeModule(signals),
+        fakeMove: runFakeMoveModule(signals),
+        tooLate: runTooLateModule(signals),
+        deadVsSleeping: runDeadVsSleepingModule(signals),
+        holderPsychology: runHolderPsychologyModule(signals),
+        rugNarrative: runRugNarrativeModule(signals)
+      };
+      
+      // Aggregate into final verdict
+      const result = aggregateModules(moduleResults);
+      
+      return {
+        tokenAddress,
+        tokenName: signals.helius?.metadata?.name || 'Unknown',
+        tokenSymbol: signals.helius?.metadata?.symbol || '???',
+        ...result,
+        dataQuality: signals.dataQuality,
+        analyzedAt: Date.now()
+      };
+    }
+    
+    // ============================================
+    // UI STATE & RENDERING
+    // ============================================
+    const state = {
+      view: 'home', // 'home' | 'loading' | 'result'
+      tokenAddress: '',
+      result: null,
+      error: null,
+      recentAnalyses: JSON.parse(localStorage.getItem('recentAnalyses') || '[]'),
+      showDetails: false,
+      toast: null
+    };
+    
+    function saveRecentAnalysis(result) {
+      const recent = state.recentAnalyses.filter(r => r.tokenAddress !== result.tokenAddress);
+      recent.unshift({
+        tokenAddress: result.tokenAddress,
+        tokenSymbol: result.tokenSymbol,
+        verdict: result.verdict,
+        timestamp: result.analyzedAt
+      });
+      state.recentAnalyses = recent.slice(0, 5);
+      localStorage.setItem('recentAnalyses', JSON.stringify(state.recentAnalyses));
+    }
+    
+    function showToast(message) {
+      state.toast = message;
+      render();
+      setTimeout(() => {
+        state.toast = null;
+        render();
+      }, 2500);
+    }
+    
+    function formatFlag(flag) {
+      return flag.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    }
+    
+    function generateShareText(result) {
+      const lines = [
+        `${result.tokenSymbol} Verdict: ${result.verdict}`,
+        `Confidence: ${result.confidence}`,
+        '',
+        'Why:',
+        ...result.whyBullets.map(b => `• ${b}`),
+      ];
+      
+      if (result.riskFlags.length > 0) {
+        lines.push('', 'Risks: ' + result.riskFlags.map(formatFlag).join(', '));
+      }
+      
+      if (result.timingNote) {
+        lines.push('', result.timingNote);
+      }
+      
+      lines.push('', '— via VERDICT');
+      
+      return lines.join('\n');
+    }
+    
+    async function handleAnalyze() {
+      const address = state.tokenAddress.trim();
+      if (!address) return;
+      
+      state.view = 'loading';
+      state.error = null;
+      render();
+      
+      try {
+        const result = await analyzeToken(address);
+        state.result = result;
+        state.view = 'result';
+        saveRecentAnalysis(result);
+      } catch (err) {
+        state.error = err.message;
+        state.view = 'home';
+      }
+      
+      render();
+    }
+    
+    function handleCopy() {
+      const text = generateShareText(state.result);
+      navigator.clipboard.writeText(text).then(() => {
+        showToast('Copied to clipboard');
+      });
+    }
+    
+    async function handleShare() {
+      const text = generateShareText(state.result);
+      
+      if (navigator.share) {
+        try {
+          await navigator.share({
+            title: `${state.result.tokenSymbol} Verdict`,
+            text: text
+          });
+        } catch (err) {
+          handleCopy();
+        }
+      } else {
+        handleCopy();
+      }
+    }
+    
+    function handleNewToken() {
+      state.view = 'home';
+      state.tokenAddress = '';
+      state.result = null;
+      state.showDetails = false;
+      render();
+    }
+    
+    function handleRecentClick(address) {
+      state.tokenAddress = address;
+      handleAnalyze();
+    }
+    
+    function render() {
+      const app = document.getElementById('app');
+      
+      if (state.view === 'home') {
+        app.innerHTML = renderHome();
+      } else if (state.view === 'loading') {
+        app.innerHTML = renderLoading();
+      } else if (state.view === 'result') {
+        app.innerHTML = renderResult();
+      }
+      
+      // Attach event listeners
+      attachEventListeners();
+    }
+    
+    function renderHome() {
+      return `
+        <div class="min-h-screen flex flex-col px-5 pt-12 pb-8 safe-bottom">
+          <!-- Header -->
+          <div class="text-center mb-8 fade-in">
+            <h1 class="text-4xl font-bold tracking-tight mb-2">VERDICT</h1>
+            <p class="text-neutral-500 text-sm">One token. One decision. No noise.</p>
+          </div>
+          
+          <!-- Input Section -->
+          <div class="flex-1 flex flex-col justify-center max-w-md mx-auto w-full">
+            <div class="space-y-4 slide-up">
+              <div class="relative">
+                <input
+                  id="tokenInput"
+                  type="text"
+                  placeholder="Paste token address..."
+                  value="${state.tokenAddress}"
+                  class="w-full bg-neutral-900 border border-neutral-800 rounded-2xl px-5 py-4 text-base mono placeholder:text-neutral-600 focus:outline-none focus:border-neutral-600 focus:ring-1 focus:ring-neutral-600 transition-all"
+                  autocomplete="off"
+                  autocorrect="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                />
+              </div>
+              
+              <button
+                id="analyzeBtn"
+                class="w-full bg-white text-black font-semibold text-lg py-4 rounded-2xl tap-feedback transition-all hover:bg-neutral-200 active:bg-neutral-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                ${!state.tokenAddress.trim() ? 'disabled' : ''}
+              >
+                Analyze
+              </button>
+              
+              ${state.error ? `
+                <div class="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-red-400 text-sm text-center">
+                  ${state.error}
+                </div>
+              ` : ''}
+            </div>
+            
+            <!-- Recent Analyses -->
+            ${state.recentAnalyses.length > 0 ? `
+              <div class="mt-10">
+                <p class="text-neutral-500 text-xs uppercase tracking-wider mb-3">Recent</p>
+                <div class="space-y-2">
+                  ${state.recentAnalyses.map(r => `
+                    <button
+                      class="recent-item w-full flex items-center justify-between bg-neutral-900/50 border border-neutral-800/50 rounded-xl px-4 py-3 tap-feedback transition-all hover:bg-neutral-800/50"
+                      data-address="${r.tokenAddress}"
+                    >
+                      <span class="mono text-sm text-neutral-400 truncate max-w-[180px]">${r.tokenAddress}</span>
+                      <span class="text-xs font-medium verdict-text-${r.verdict.toLowerCase()}">${r.verdict}</span>
+                    </button>
+                  `).join('')}
+                </div>
+              </div>
+            ` : ''}
+          </div>
+          
+          <!-- Footer -->
+          <div class="text-center mt-8">
+            <p class="text-neutral-600 text-xs">Solana tokens • Not financial advice</p>
           </div>
         </div>
-        <div style="display:flex;gap:10px;align-items:center">
-          <a class="btn" href="https://www.jackpotcoin.fun/" target="_blank" rel="noopener">Jackpot ↗</a>
-          <button class="btn btnPrimary" id="refreshBtn" type="button">Refresh</button>
+      `;
+    }
+    
+    function renderLoading() {
+      return `
+        <div class="min-h-screen flex flex-col items-center justify-center px-5">
+          <div class="text-center">
+            <div class="mb-6">
+              <div class="w-16 h-16 rounded-full border-4 border-neutral-800 border-t-white animate-spin mx-auto"></div>
+            </div>
+            <p class="text-neutral-400 text-sm">Analyzing token...</p>
+            <p class="text-neutral-600 text-xs mt-2 mono">${state.tokenAddress.slice(0, 8)}...${state.tokenAddress.slice(-6)}</p>
+          </div>
+          
+          <!-- Skeleton preview -->
+          <div class="w-full max-w-sm mt-12 space-y-4">
+            <div class="skeleton h-16 rounded-2xl"></div>
+            <div class="skeleton h-8 rounded-xl w-1/3"></div>
+            <div class="space-y-2">
+              <div class="skeleton h-6 rounded-lg"></div>
+              <div class="skeleton h-6 rounded-lg w-5/6"></div>
+              <div class="skeleton h-6 rounded-lg w-4/6"></div>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="wrap">
-    <div class="card cardGlow" style="margin-top:14px;">
-      <div class="kicker"><span class="dot"></span> MVP: Pump.fun scrape • On-chain verification next</div>
-      <div class="h2">Newest tokens (raw feed)</div>
-      <p class="sub">Tonight we ship the feed + UI. Next we add the scoring engine to filter “clean”.</p>
-
-      <div class="controls">
-        <input class="input" id="search" placeholder="Search mint…" />
-        <select class="select" id="sort">
-          <option value="newest">Sort: newest seen</option>
-          <option value="alpha">Sort: A → Z</option>
-        </select>
-        <select class="select" id="limit">
-          <option value="50">Show 50</option>
-          <option value="100">Show 100</option>
-          <option value="200">Show 200</option>
-        </select>
-      </div>
-
-      <div class="foot" id="statusLine">Loading…</div>
-    </div>
-
-    <div class="grid" id="list"></div>
-
-    <div class="foot">
-      Disclaimer: This is not financial advice. This tool shows *observations and heuristics* — no guarantees.
-    </div>
-  </div>
-
-  <script src="./app.js"></script>
+      `;
+    }
+    
+    function renderResult() {
+      const r = state.result;
+      const verdictConfig = VERDICTS[r.verdict];
+      const confidenceConfig = CONFIDENCE_LEVELS[r.confidence];
+      
+      return `
+        <div class="min-h-screen flex flex-col px-5 pt-8 pb-6 safe-bottom">
+          <!-- Header -->
+          <div class="flex items-center justify-between mb-6 slide-up">
+            <button id="newTokenBtn" class="text-neutral-400 text-sm tap-feedback py-2 -ml-2 px-2">
+              ← New
+            </button>
+            <div class="text-right">
+              <p class="mono text-xs text-neutral-500">${r.tokenAddress.slice(0, 6)}...${r.tokenAddress.slice(-4)}</p>
+              <p class="text-sm font-medium">${r.tokenSymbol}</p>
+            </div>
+          </div>
+          
+          <!-- Verdict Card -->
+          <div class="slide-up" style="animation-delay: 0.05s">
+            <div class="verdict-${verdictConfig.color} rounded-3xl p-6 mb-4">
+              <div class="text-center">
+                <p class="text-black/60 text-xs uppercase tracking-wider mb-1">Verdict</p>
+                <h2 class="text-5xl font-bold text-white tracking-tight">${r.verdict}</h2>
+              </div>
+            </div>
+            
+            <!-- Confidence -->
+            <div class="flex items-center justify-center gap-2 mb-6">
+              <span class="text-neutral-500 text-sm">Confidence:</span>
+              <span class="${confidenceConfig.color} font-semibold text-sm">${r.confidence}</span>
+              ${r.dataQuality === 'partial' ? '<span class="text-orange-400 text-xs">(partial data)</span>' : ''}
+            </div>
+          </div>
+          
+          <!-- Why Section -->
+          <div class="flex-1 slide-up" style="animation-delay: 0.1s">
+            <div class="bg-neutral-900 rounded-2xl p-5 mb-4">
+              <p class="text-neutral-500 text-xs uppercase tracking-wider mb-3">Why</p>
+              <ul class="space-y-2">
+                ${r.whyBullets.map(bullet => `
+                  <li class="flex items-start gap-2">
+                    <span class="text-neutral-500 mt-1">•</span>
+                    <span class="text-neutral-200 text-sm leading-relaxed">${bullet}</span>
+                  </li>
+                `).join('')}
+              </ul>
+            </div>
+            
+            <!-- Risk Flags -->
+            ${r.riskFlags.length > 0 ? `
+              <div class="bg-neutral-900/50 rounded-2xl p-5 mb-4">
+                <p class="text-neutral-500 text-xs uppercase tracking-wider mb-3">Risk Flags</p>
+                <div class="flex flex-wrap gap-2">
+                  ${r.riskFlags.map(flag => `
+                    <span class="bg-red-500/10 text-red-400 text-xs px-3 py-1.5 rounded-full border border-red-500/20">
+                      ${formatFlag(flag)}
+                    </span>
+                  `).join('')}
+                </div>
+              </div>
+            ` : ''}
+            
+            <!-- Timing Note -->
+            ${r.timingNote ? `
+              <div class="bg-neutral-800/30 border border-neutral-800 rounded-2xl p-4 mb-4">
+                <p class="text-neutral-300 text-sm text-center italic">"${r.timingNote}"</p>
+              </div>
+            ` : ''}
+            
+            <!-- Details Toggle -->
+            <button id="toggleDetails" class="w-full text-center text-neutral-500 text-sm py-2 tap-feedback">
+              ${state.showDetails ? 'Hide module scores ▲' : 'Show module scores ▼'}
+            </button>
+            
+            ${state.showDetails ? `
+              <div class="bg-neutral-900/30 rounded-2xl p-4 mt-2 fade-in">
+                <div class="grid grid-cols-2 gap-3 text-xs">
+                  <div class="flex justify-between">
+                    <span class="text-neutral-500">Worth Time</span>
+                    <span class="mono">${r.scores.worthMyTime}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-neutral-500">Fake Move</span>
+                    <span class="mono">${r.scores.fakeMove}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-neutral-500">Too Late</span>
+                    <span class="mono">${r.scores.tooLate}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-neutral-500">Dead/Sleep</span>
+                    <span class="mono">${r.scores.deadVsSleeping}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-neutral-500">Holder Psych</span>
+                    <span class="mono">${r.scores.holderPsychology}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-neutral-500">Rug Scan</span>
+                    <span class="mono">${r.scores.rugNarrative}</span>
+                  </div>
+                </div>
+                <div class="border-t border-neutral-800 mt-3 pt-3 flex justify-between text-sm">
+                  <span class="text-neutral-400">Overall</span>
+                  <span class="font-semibold mono">${r.scores.overall}</span>
+                </div>
+              </div>
+            ` : ''}
+          </div>
+          
+          <!-- Actions -->
+          <div class="mt-6 space-y-3 slide-up" style="animation-delay: 0.15s">
+            <div class="flex gap-3">
+              <button id="shareBtn" class="flex-1 bg-neutral-800 text-white font-medium py-4 rounded-2xl tap-feedback transition-all hover:bg-neutral-700">
+                Share
+              </button>
+              <button id="copyBtn" class="flex-1 bg-neutral-800 text-white font-medium py-4 rounded-2xl tap-feedback transition-all hover:bg-neutral-700">
+                Copy
+              </button>
+            </div>
+            <button id="newAnalysisBtn" class="w-full bg-white text-black font-semibold py-4 rounded-2xl tap-feedback transition-all hover:bg-neutral-200">
+              Analyze Another
+            </button>
+          </div>
+          
+          <!-- Toast -->
+          ${state.toast ? `
+            <div class="fixed bottom-24 left-1/2 -translate-x-1/2 bg-neutral-800 text-white px-6 py-3 rounded-full text-sm font-medium shadow-2xl toast">
+              ${state.toast}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+    
+    function attachEventListeners() {
+      // Token input
+      const tokenInput = document.getElementById('tokenInput');
+      if (tokenInput) {
+        tokenInput.addEventListener('input', (e) => {
+          state.tokenAddress = e.target.value;
+          const btn = document.getElementById('analyzeBtn');
+          if (btn) btn.disabled = !e.target.value.trim();
+        });
+        tokenInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && state.tokenAddress.trim()) {
+            handleAnalyze();
+          }
+        });
+      }
+      
+      // Analyze button
+      const analyzeBtn = document.getElementById('analyzeBtn');
+      if (analyzeBtn) {
+        analyzeBtn.addEventListener('click', handleAnalyze);
+      }
+      
+      // Recent items
+      document.querySelectorAll('.recent-item').forEach(item => {
+        item.addEventListener('click', () => {
+          handleRecentClick(item.dataset.address);
+        });
+      });
+      
+      // Result actions
+      const shareBtn = document.getElementById('shareBtn');
+      if (shareBtn) shareBtn.addEventListener('click', handleShare);
+      
+      const copyBtn = document.getElementById('copyBtn');
+      if (copyBtn) copyBtn.addEventListener('click', handleCopy);
+      
+      const newTokenBtn = document.getElementById('newTokenBtn');
+      if (newTokenBtn) newTokenBtn.addEventListener('click', handleNewToken);
+      
+      const newAnalysisBtn = document.getElementById('newAnalysisBtn');
+      if (newAnalysisBtn) newAnalysisBtn.addEventListener('click', handleNewToken);
+      
+      const toggleDetails = document.getElementById('toggleDetails');
+      if (toggleDetails) {
+        toggleDetails.addEventListener('click', () => {
+          state.showDetails = !state.showDetails;
+          render();
+        });
+      }
+    }
+    
+    // ============================================
+    // PWA / SERVICE WORKER
+    // ============================================
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').catch(() => {});
+      });
+    }
+    
+    // Initialize
+    render();
+  </script>
 </body>
 </html>
