@@ -1,409 +1,395 @@
-// netlify/functions/scored-feed.ts
-// Builds a scored, explainable feed from Upstash-stored Pump webhook launches.
-// Adds: TTL cache, soft per-IP rate limit, and basic on-chain mint validation + authority checks.
+import type { Handler, HandlerEvent } from "@netlify/functions";
 
-type AnyObj = Record<string, any>;
+// ============================================================================
+// SCORED-FEED.TS — Pump.fun Watch Risk Scoring Engine v1 (Off-Chain Only)
+// By Aegis / Jackpot
+// ============================================================================
 
-const VERSION = "scored-feed@v1.1.0";
-
-// Upstash (same as your get-pump-feed.ts)
-const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL!;
-const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN!;
-const KEY_LAUNCHES = "pumpwatch:launches";
-
-// RPC (free fallback). Optional: set SOLANA_RPC_URL to a paid/fast endpoint (Helius, Triton, etc.)
-const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
-
-// per warm instance cache
-const CACHE_TTL_MS = 60_000;
-let CACHE: { at: number; payload: any | null } = { at: 0, payload: null };
-
-// per warm instance rate limit (soft)
-const RL_WINDOW_MS = 10_000;
-const RL_MAX = 25;
-const RL = new Map<string, { n: number; resetAt: number }>();
-
-// per mint on-chain cache (avoid hammering RPC)
-const ONCHAIN_TTL_MS = 5 * 60_000;
-const ONCHAIN = new Map<string, { at: number; data: OnchainMintInfo | null }>();
-
-/* ---------------- response helpers ---------------- */
-
-function j(statusCode: number, body: any, headers: Record<string, string> = {}) {
-  return {
-    statusCode,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-      "Cache-Control": "no-store",
-      ...headers,
-    },
-    body: JSON.stringify(body),
-  };
+// --- Types ---
+interface RawLaunchItem {
+  kind?: string;
+  mint?: string | null;
+  name?: string;
+  symbol?: string;
+  uri?: string;
+  creatorHex?: string;
+  isMayhem?: boolean;
+  signature?: string | null;
+  slot?: number | null;
+  timestamp?: number;
 }
 
-function getClientIp(event: any) {
-  const h = event.headers || {};
-  return (
-    h["x-nf-client-connection-ip"] ||
-    (h["x-forwarded-for"] ? String(h["x-forwarded-for"]).split(",")[0].trim() : "") ||
-    "unknown"
-  );
-}
-
-function rateLimitOk(ip: string) {
-  const now = Date.now();
-  const row = RL.get(ip);
-  if (!row || now > row.resetAt) {
-    RL.set(ip, { n: 1, resetAt: now + RL_WINDOW_MS });
-    return true;
-  }
-  row.n += 1;
-  RL.set(ip, row);
-  return row.n <= RL_MAX;
-}
-
-/* ---------------- shared validation ---------------- */
-
-// Solana base58 pubkey validation
-const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]+$/;
-function isValidPubkey(s: any) {
-  if (typeof s !== "string") return false;
-  const v = s.trim();
-  if (v.length < 32 || v.length > 44) return false;
-  return BASE58_RE.test(v);
-}
-
-function safeHttpUrl(u: any) {
-  try {
-    const url = new URL(String(u));
-    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-function toISO(v: any) {
-  try {
-    const d = new Date(v);
-    if (Number.isNaN(d.getTime())) return null;
-    return d.toISOString();
-  } catch {
-    return null;
-  }
-}
-
-/* ---------------- upstash redis ---------------- */
-
-async function redis(path: string[], body?: any) {
-  const res = await fetch(`${REDIS_URL}/${path.map(encodeURIComponent).join("/")}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${REDIS_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(`Upstash ${res.status}: ${JSON.stringify(data)}`);
-  return data;
-}
-
-async function loadLaunches(limit: number) {
-  const r = await redis(["lrange", KEY_LAUNCHES, "0", String(limit - 1)]);
-  const rows: string[] = Array.isArray(r?.result) ? r.result : [];
-  const items = rows
-    .map((s) => {
-      try {
-        return JSON.parse(s);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
-  return items as AnyObj[];
-}
-
-/* ---------------- on-chain RPC ---------------- */
-
-type OnchainMintInfo = {
-  exists: boolean;
-  mintAuthority: string | null;
-  freezeAuthority: string | null;
-  decimals: number | null;
-  isInitialized: boolean | null;
-};
-
-async function rpc(method: string, params: any[]) {
-  const res = await fetch(SOLANA_RPC_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(`RPC ${res.status}`);
-  if (data?.error) throw new Error(`RPC error: ${JSON.stringify(data.error)}`);
-  return data?.result;
-}
-
-// SPL Token mint account layout (legacy token program) decoding.
-// We only need mintAuthOption/mintAuth and freezeAuthOption/freezeAuth, decimals, isInitialized.
-function readU32LE(buf: Uint8Array, off: number) {
-  return (buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)) >>> 0;
-}
-function readU64LE(buf: Uint8Array, off: number) {
-  // supply not needed, but we advance cursor; kept for correctness
-  let lo = 0, hi = 0;
-  for (let i = 0; i < 4; i++) lo |= buf[off + i] << (8 * i);
-  for (let i = 0; i < 4; i++) hi |= buf[off + 4 + i] << (8 * i);
-  return { lo: lo >>> 0, hi: hi >>> 0 };
-}
-function base64ToU8(b64: string) {
-  const bin = Buffer.from(b64, "base64");
-  return new Uint8Array(bin.buffer, bin.byteOffset, bin.byteLength);
-}
-
-// NOTE: We can't base58-encode pubkeys without deps; but RPC can provide parsed data if we ask.
-// So we prefer getAccountInfo with "jsonParsed" first. If not parsed, we decode raw bytes but can’t render authority pubkeys.
-// Therefore: use jsonParsed when available; raw fallback sets authorities = "unknown".
-async function fetchMintOnchain(mint: string): Promise<OnchainMintInfo> {
-  // cache
-  const now = Date.now();
-  const cached = ONCHAIN.get(mint);
-  if (cached && now - cached.at < ONCHAIN_TTL_MS) return cached.data || { exists: false, mintAuthority: null, freezeAuthority: null, decimals: null, isInitialized: null };
-
-  let out: OnchainMintInfo = {
-    exists: false,
-    mintAuthority: null,
-    freezeAuthority: null,
-    decimals: null,
-    isInitialized: null,
-  };
-
-  try {
-    // Prefer jsonParsed (best UX for authorities)
-    const r1 = await rpc("getAccountInfo", [mint, { encoding: "jsonParsed", commitment: "confirmed" }]);
-    const v = r1?.value;
-    if (!v) {
-      out.exists = false;
-    } else {
-      out.exists = true;
-
-      const parsed = v?.data?.parsed;
-      if (parsed?.type === "mint" && parsed?.info) {
-        // token-2022 mints might differ; still often parseable.
-        out.decimals = typeof parsed.info.decimals === "number" ? parsed.info.decimals : null;
-        out.isInitialized = typeof parsed.info.isInitialized === "boolean" ? parsed.info.isInitialized : null;
-
-        // In jsonParsed, mintAuthority/freezeAuthority can be string or null
-        out.mintAuthority = typeof parsed.info.mintAuthority === "string" ? parsed.info.mintAuthority : null;
-        out.freezeAuthority = typeof parsed.info.freezeAuthority === "string" ? parsed.info.freezeAuthority : null;
-      } else if (Array.isArray(v?.data) && typeof v.data[0] === "string") {
-        // raw base64 fallback
-        const b64 = v.data[0];
-        const buf = base64ToU8(b64);
-        if (buf.length >= 82) {
-          const mintAuthOption = readU32LE(buf, 0);
-          // 32 bytes mintAuth after option
-          const decimals = buf[44 + 8]; // option(4)+auth(32)+supply(8)=44, decimals at 44
-          const isInit = buf[45] === 1;
-          const freezeAuthOption = readU32LE(buf, 46);
-          out.decimals = typeof decimals === "number" ? decimals : null;
-          out.isInitialized = isInit;
-
-          // Authorities unknown without base58 encoding; we can at least report presence/absence
-          out.mintAuthority = mintAuthOption === 0 ? null : "present";
-          out.freezeAuthority = freezeAuthOption === 0 ? null : "present";
-        }
-      }
-    }
-  } catch {
-    // treat as unknown; don't fail the whole feed
-  }
-
-  ONCHAIN.set(mint, { at: now, data: out });
-  return out;
-}
-
-/* ---------------- scoring ---------------- */
-
-type TokenScored = {
+interface ScoredToken {
   mint: string | null;
-  firstSeenUTC: string | null;
+  firstSeenUTC: string;
   source: string;
   pumpUrl: string | null;
-
-  // extra metadata (from webhook)
-  name?: string | null;
-  symbol?: string | null;
-  uri?: string | null;
-  creatorHex?: string | null;
-  signature?: string | null;
-  isMayhem?: boolean | null;
-
+  name: string;
+  symbol: string;
+  uri: string;
+  creatorHex: string;
+  signature: string | null;
+  isMayhem: boolean;
   score: number;
   verdict: "clean-ish" | "caution" | "high-risk" | "unknown";
   reasons: string[];
-  signals: AnyObj;
-};
-
-function clamp(n: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, n));
+  signals: Record<string, unknown>;
 }
 
-function scoreTokenV1(item: AnyObj, onchain: OnchainMintInfo | null): TokenScored {
-  const reasons: string[] = [];
-  const signals: AnyObj = {};
+interface ScoredFeedResponse {
+  ok: boolean;
+  version: string;
+  updatedUTC: string;
+  sourceInfo: {
+    provider: string;
+    cacheHit: boolean;
+    cacheTTL: number;
+    itemsFromUpstash: number;
+  };
+  count: number;
+  items: ScoredToken[];
+  error?: string;
+}
 
-  const mint = typeof item?.mint === "string" ? item.mint.trim() : "";
-  const name = typeof item?.name === "string" ? item.name.trim() : null;
-  const symbol = typeof item?.symbol === "string" ? item.symbol.trim() : null;
-  const uri = safeHttpUrl(item?.uri) || null;
-  const creatorHex = typeof item?.creatorHex === "string" ? item.creatorHex.trim() : null;
-  const isMayhem = typeof item?.isMayhem === "boolean" ? item.isMayhem : null;
-  const signature = typeof item?.signature === "string" ? item.signature : null;
+// --- Constants ---
+const VERSION = "1.0.0";
+const CACHE_TTL_MS = 60_000; // 60 seconds
+const RATE_LIMIT_WINDOW_MS = 10_000;
+const RATE_LIMIT_MAX = 25;
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+const MIN_LIMIT = 1;
 
-  // Pump URL: stable/derived
-  const pumpUrl = mint ? `https://pump.fun/${mint}` : null;
+// Base58 alphabet for validation
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-  // firstSeen derived from timestamp (webhook gives seconds)
-  const tsSec = typeof item?.timestamp === "number" ? item.timestamp : null;
-  const firstSeenUTC = tsSec ? toISO(tsSec * 1000) : null;
+// Suspicious URI patterns
+const SUSPICIOUS_URI_PATTERNS = [
+  /^data:/i,
+  /^javascript:/i,
+  /[?&].{500,}/,  // Very long query strings
+];
 
-  const source = "webhook:create_v2";
+// Scammy symbol patterns
+const SCAMMY_SYMBOL_PATTERNS = [
+  /(.)\1{4,}/,  // Repeated chars 5+
+  /[\u{1F300}-\u{1F9FF}]{3,}/u,  // 3+ emojis in a row
+  /[\u0400-\u04FF]/,  // Cyrillic (confusables)
+  /[\u0370-\u03FF]/,  // Greek (confusables) 
+];
 
-  signals.mint = mint || null;
-  signals.name = name;
-  signals.symbol = symbol;
-  signals.uri = uri;
-  signals.creatorHex = creatorHex;
-  signals.isMayhem = isMayhem;
-  signals.signature = signature;
-  signals.timestamp = tsSec;
+// --- In-Memory Cache ---
+interface CacheEntry {
+  data: ScoredFeedResponse;
+  expiresAt: number;
+}
 
-  let score = 20; // start fairly low; add risk points
+let feedCache: CacheEntry | null = null;
 
-  // integrity
-  if (!mint) {
+// --- Rate Limiting (Soft, In-Memory) ---
+const rateLimitMap = new Map<string, { count: number; windowStart: number }>();
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    rateLimitMap.set(ip, { count: 1, windowStart: now });
+    return true;
+  }
+  
+  if (entry.count >= RATE_LIMIT_MAX) {
+    return false;
+  }
+  
+  entry.count++;
+  return true;
+}
+
+// Cleanup old rate limit entries periodically
+function cleanupRateLimits() {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimitMap.entries()) {
+    if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+      rateLimitMap.delete(ip);
+    }
+  }
+}
+
+// --- Upstash Fetch ---
+async function fetchFromUpstash(limit: number): Promise<RawLaunchItem[]> {
+  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+  if (!upstashUrl || !upstashToken) {
+    throw new Error("Upstash credentials not configured");
+  }
+
+  // Fetch more than requested to build creator frequency map
+  const fetchCount = Math.min(limit * 4, 200);
+  
+  const response = await fetch(`${upstashUrl}/lrange/pumpwatch:launches/0/${fetchCount - 1}`, {
+    headers: {
+      Authorization: `Bearer ${upstashToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Upstash returned ${response.status}`);
+  }
+
+  const data = await response.json();
+  
+  if (!data.result || !Array.isArray(data.result)) {
+    return [];
+  }
+
+  // Parse each item defensively
+  return data.result.map((item: string | unknown) => {
+    try {
+      if (typeof item === "string") {
+        return JSON.parse(item) as RawLaunchItem;
+      }
+      return item as RawLaunchItem;
+    } catch {
+      return {} as RawLaunchItem;
+    }
+  });
+}
+
+// --- Validation Helpers ---
+function isValidBase58(str: string): boolean {
+  if (str.length < 32 || str.length > 44) return false;
+  for (const char of str) {
+    if (!BASE58_ALPHABET.includes(char)) return false;
+  }
+  return true;
+}
+
+function isValidHttpsUrl(uri: string): { valid: boolean; isHttps: boolean; host: string } {
+  try {
+    const url = new URL(uri);
     return {
-      mint: null,
-      firstSeenUTC,
-      source,
-      pumpUrl: null,
-      name,
-      symbol,
-      uri,
-      creatorHex,
-      signature,
-      isMayhem,
-      score: 100,
-      verdict: "unknown",
-      reasons: ["Missing mint"],
-      signals,
+      valid: true,
+      isHttps: url.protocol === "https:",
+      host: url.host,
     };
+  } catch {
+    return { valid: false, isHttps: false, host: "" };
+  }
+}
+
+function hasSuspiciousUriPattern(uri: string): boolean {
+  return SUSPICIOUS_URI_PATTERNS.some((pattern) => pattern.test(uri));
+}
+
+function hasScammySymbol(symbol: string): boolean {
+  return SCAMMY_SYMBOL_PATTERNS.some((pattern) => pattern.test(symbol));
+}
+
+function hasNonPrintableChars(str: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(str);
+}
+
+function isReasonableTimestamp(ts: number): boolean {
+  // Should be after 2024-01-01 and before now + 1 day
+  const min = 1704067200; // 2024-01-01
+  const max = Math.floor(Date.now() / 1000) + 86400;
+  return ts >= min && ts <= max;
+}
+
+// --- Scoring Engine ---
+function scoreToken(
+  item: RawLaunchItem,
+  creatorFrequencyMap: Map<string, number>,
+  recentCreators: Set<string>
+): ScoredToken {
+  let score = 0;
+  const reasons: string[] = [];
+  const signals: Record<string, unknown> = {};
+  let forceUnknown = false;
+
+  // Extract fields with defaults
+  const mint = item.mint ?? null;
+  const name = typeof item.name === "string" ? item.name.slice(0, 100) : "";
+  const symbol = typeof item.symbol === "string" ? item.symbol.slice(0, 20) : "";
+  const uri = typeof item.uri === "string" ? item.uri.slice(0, 500) : "";
+  const creatorHex = typeof item.creatorHex === "string" ? item.creatorHex : "";
+  const signature = item.signature ?? null;
+  const isMayhem = Boolean(item.isMayhem);
+  const timestamp = typeof item.timestamp === "number" ? item.timestamp : 0;
+
+  signals.rawMint = mint;
+  signals.rawTimestamp = timestamp;
+  signals.isMayhem = isMayhem;
+
+  // === A) Integrity / Completeness ===
+  
+  // A1: Missing mint => unknown
+  if (!mint) {
+    score = 100;
+    reasons.push("Missing mint address");
+    forceUnknown = true;
+    signals.missingMint = true;
+  } else {
+    // A2: Invalid base58 mint
+    if (!isValidBase58(mint)) {
+      score += 55;
+      reasons.push("Invalid mint format (not valid base58)");
+      signals.invalidMintFormat = true;
+    }
   }
 
-  if (!isValidPubkey(mint)) {
-    score += 55;
-    reasons.push("Mint format looks invalid (base58/length check failed)");
+  // A3: Missing signature
+  if (!signature) {
+    score += 10;
+    reasons.push("Missing transaction signature");
+    signals.missingSignature = true;
+  } else {
+    signals.signatureTruncated = signature.slice(0, 8) + "..." + signature.slice(-4);
   }
 
+  // A4: Missing name
   if (!name) {
     score += 10;
-    reasons.push("Missing token name in create_v2 payload");
+    reasons.push("Missing token name");
+    signals.missingName = true;
   }
 
+  // A5: Missing symbol
   if (!symbol) {
-    score += 8;
-    reasons.push("Missing token symbol in create_v2 payload");
-  }
-
-  if (!uri) {
-    score += 12;
-    reasons.push("Missing/invalid metadata URI");
-  }
-
-  // creatorHex is your parsed 32 bytes hex (should be 64 chars)
-  if (!creatorHex || !/^[0-9a-fA-F]{64}$/.test(creatorHex)) {
-    score += 12;
-    reasons.push("Creator bytes missing/invalid (hex length check failed)");
-  }
-
-  if (!signature) {
-    score += 6;
-    reasons.push("Missing transaction signature");
-  }
-
-  if (isMayhem === true) {
     score += 10;
-    reasons.push("Flag: create_v2 indicates mayhem mode (treat as higher risk)");
+    reasons.push("Missing token symbol");
+    signals.missingSymbol = true;
   }
 
-  // timestamp sanity
-  if (!firstSeenUTC) {
-    score += 8;
-    reasons.push("Missing/invalid timestamp");
+  // A6: URI validation
+  if (!uri) {
+    score += 15;
+    reasons.push("Missing metadata URI");
+    signals.missingUri = true;
   } else {
-    const now = Date.now();
-    const seen = new Date(firstSeenUTC).getTime();
-    if (seen > now + 60_000) {
-      score += 6;
-      reasons.push("Timestamp is in the future (clock skew or malformed event)");
+    const uriCheck = isValidHttpsUrl(uri);
+    signals.uriHost = uriCheck.host || "(invalid)";
+    
+    if (!uriCheck.valid) {
+      score += 15;
+      reasons.push("Invalid metadata URI format");
+      signals.invalidUri = true;
+    } else if (!uriCheck.isHttps) {
+      score += 10;
+      reasons.push("Metadata URI uses insecure HTTP");
+      signals.insecureUri = true;
+    }
+
+    // Check suspicious patterns
+    if (hasSuspiciousUriPattern(uri)) {
+      score = 100;
+      reasons.push("Suspicious URI pattern detected (data:/javascript:/excessive params)");
+      forceUnknown = true;
+      signals.suspiciousUriPattern = true;
     }
   }
 
-  // On-chain checks (basic, proof-first)
-  if (!onchain) {
-    reasons.push("On-chain mint checks unavailable (RPC error/limit) — treat as unknown");
-    score += 8;
-  } else {
-    signals.onchain = onchain;
-
-    if (!onchain.exists) {
-      score += 45;
-      reasons.push("On-chain: mint account not found (could be malformed or not finalized)");
-    } else {
-      // Mint authority present = can mint more supply (many rugs keep this).
-      if (onchain.mintAuthority) {
-        score += 12;
-        reasons.push("On-chain: mint authority is present (supply can potentially be increased)");
-      } else {
-        reasons.push("On-chain: mint authority appears unset (cannot mint more via authority)");
-      }
-
-      // Freeze authority present = can freeze accounts (often disliked by buyers).
-      if (onchain.freezeAuthority) {
-        score += 10;
-        reasons.push("On-chain: freeze authority is present (accounts can be frozen)");
-      } else {
-        reasons.push("On-chain: freeze authority appears unset (cannot freeze via authority)");
-      }
-
-      if (typeof onchain.decimals === "number") {
-        // not a rug signal; just transparency
-        reasons.push(`On-chain: decimals = ${onchain.decimals}`);
-      }
-    }
+  // A7: Timestamp validation
+  if (!timestamp || !isReasonableTimestamp(timestamp)) {
+    score += 10;
+    reasons.push("Missing or unreasonable timestamp");
+    signals.badTimestamp = true;
   }
 
-  score = clamp(score, 0, 100);
+  // === B) Name/Symbol Content Risk ===
+  
+  // B1: Too long name (>50 chars is suspicious)
+  if (name.length > 50) {
+    score += 10;
+    reasons.push("Unusually long token name");
+    signals.longName = name.length;
+  }
 
-  let verdict: TokenScored["verdict"] = "caution";
-  if (score <= 25) verdict = "clean-ish";
-  else if (score <= 60) verdict = "caution";
-  else verdict = "high-risk";
+  // B2: Too long symbol (>10 chars is unusual)
+  if (symbol.length > 10) {
+    score += 10;
+    reasons.push("Unusually long symbol");
+    signals.longSymbol = symbol.length;
+  }
 
-  // If mint invalid + on-chain not found => unknown
-  if (!isValidPubkey(mint) && (!onchain || !onchain.exists)) verdict = "unknown";
+  // B3: Non-printable characters
+  if (hasNonPrintableChars(name) || hasNonPrintableChars(symbol)) {
+    score += 25;
+    reasons.push("Contains non-printable/control characters");
+    signals.nonPrintableChars = true;
+  }
 
-  // If we somehow generated no reasons, be honest
-  if (reasons.length === 0) reasons.push("Only basic checks applied (no additional signals available)");
+  // B4: Scammy symbol patterns
+  if (symbol && hasScammySymbol(symbol)) {
+    score += 10;
+    reasons.push("Symbol contains suspicious patterns (repeated chars/emojis/confusables)");
+    signals.scammySymbol = true;
+  }
+
+  // === C) Creator Reuse / Spam Detection ===
+  if (creatorHex) {
+    const frequency = creatorFrequencyMap.get(creatorHex) || 0;
+    signals.creatorHexTruncated = creatorHex.slice(0, 8) + "..." + creatorHex.slice(-4);
+    signals.creatorFrequency = frequency;
+    signals.creatorInRecent10 = recentCreators.has(creatorHex);
+
+    // Progressive risk based on frequency
+    if (frequency > 10) {
+      score += 30;
+      reasons.push(`Creator launched ${frequency} tokens recently (high spam)`);
+    } else if (frequency > 5) {
+      score += 20;
+      reasons.push(`Creator launched ${frequency} tokens recently (moderate spam)`);
+    } else if (frequency > 2) {
+      score += 10;
+      reasons.push(`Creator launched ${frequency} tokens recently`);
+    }
+
+    // Extra penalty if in recent 10
+    if (recentCreators.has(creatorHex) && frequency > 1) {
+      score += 5;
+      reasons.push("Creator very active in last 10 launches");
+    }
+  } else {
+    signals.missingCreator = true;
+    score += 15;
+    reasons.push("Missing creator identifier");
+  }
+
+  // === D) Mayhem Mode ===
+  if (isMayhem) {
+    score += 10;
+    reasons.push("Created in Mayhem mode (relaxed validation)");
+  }
+
+  // === Clamp and Verdict ===
+  score = Math.max(0, Math.min(100, score));
+
+  let verdict: ScoredToken["verdict"];
+  if (forceUnknown) {
+    verdict = "unknown";
+  } else if (score <= 25) {
+    verdict = "clean-ish";
+  } else if (score <= 60) {
+    verdict = "caution";
+  } else {
+    verdict = "high-risk";
+  }
+
+  // Build output
+  const firstSeenUTC = timestamp
+    ? new Date(timestamp * 1000).toISOString()
+    : new Date().toISOString();
+
+  const pumpUrl = mint ? `https://pump.fun/${mint}` : null;
 
   return {
     mint,
     firstSeenUTC,
-    source,
+    source: "webhook:pump_create_v2",
     pumpUrl,
     name,
     symbol,
@@ -413,71 +399,154 @@ function scoreTokenV1(item: AnyObj, onchain: OnchainMintInfo | null): TokenScore
     isMayhem,
     score,
     verdict,
-    reasons,
+    reasons: reasons.length > 0 ? reasons : ["No risk signals detected"],
     signals,
   };
 }
 
-/* ---------------- handler ---------------- */
-
-export async function handler(event: any) {
-  const ip = getClientIp(event);
-  if (!rateLimitOk(ip)) {
-    return j(
-      429,
-      { ok: false, error: "rate_limited", message: "Too many requests. Try again in a few seconds." },
-      { "retry-after": "5" }
-    );
+// --- Main Scoring Pipeline ---
+function scoreFeed(rawItems: RawLaunchItem[], limit: number): ScoredToken[] {
+  // Build creator frequency map from all items
+  const creatorFrequencyMap = new Map<string, number>();
+  for (const item of rawItems) {
+    if (item.creatorHex) {
+      creatorFrequencyMap.set(
+        item.creatorHex,
+        (creatorFrequencyMap.get(item.creatorHex) || 0) + 1
+      );
+    }
   }
 
-  const now = Date.now();
-  if (CACHE.payload && now - CACHE.at < CACHE_TTL_MS) {
-    return j(200, CACHE.payload, { "x-cache": "HIT" });
+  // Track creators in first 10 items (most recent)
+  const recentCreators = new Set<string>();
+  for (let i = 0; i < Math.min(10, rawItems.length); i++) {
+    if (rawItems[i].creatorHex) {
+      recentCreators.add(rawItems[i].creatorHex!);
+    }
+  }
+
+  // Score each token (only return requested limit)
+  const itemsToScore = rawItems.slice(0, limit);
+  return itemsToScore.map((item) => scoreToken(item, creatorFrequencyMap, recentCreators));
+}
+
+// --- Handler ---
+export const handler: Handler = async (event: HandlerEvent) => {
+  // CORS headers
+  const headers = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Cache-Control": "public, max-age=30",
+  };
+
+  // Handle preflight
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 204, headers, body: "" };
+  }
+
+  // Only allow GET
+  if (event.httpMethod !== "GET") {
+    return {
+      statusCode: 405,
+      headers,
+      body: JSON.stringify({ ok: false, error: "Method not allowed" }),
+    };
+  }
+
+  // Rate limiting
+  const clientIp = event.headers["x-forwarded-for"]?.split(",")[0]?.trim() || "unknown";
+  cleanupRateLimits();
+  
+  if (!checkRateLimit(clientIp)) {
+    return {
+      statusCode: 429,
+      headers,
+      body: JSON.stringify({ ok: false, error: "Rate limit exceeded. Try again shortly." }),
+    };
+  }
+
+  // Parse and validate limit
+  let limit = DEFAULT_LIMIT;
+  const limitParam = event.queryStringParameters?.limit;
+  if (limitParam) {
+    const parsed = parseInt(limitParam, 10);
+    if (!isNaN(parsed) && parsed >= MIN_LIMIT && parsed <= MAX_LIMIT) {
+      limit = parsed;
+    }
   }
 
   try {
-    const q = event.queryStringParameters || {};
-    const limit = Math.max(1, Math.min(200, parseInt(q.limit || "50", 10) || 50));
+    const now = Date.now();
 
-    const launches = await loadLaunches(limit);
-
-    // On-chain checks: to avoid RPC hammering, only check first N newest mints per request.
-    // You can tune this; start small to stay reliable on public RPC.
-    const ONCHAIN_CHECK_N = Math.min(30, launches.length);
-
-    const onchainByMint = new Map<string, OnchainMintInfo | null>();
-    for (let i = 0; i < ONCHAIN_CHECK_N; i++) {
-      const mint = typeof launches[i]?.mint === "string" ? launches[i].mint.trim() : "";
-      if (!mint || !isValidPubkey(mint)) continue;
-      if (onchainByMint.has(mint)) continue;
-      const info = await fetchMintOnchain(mint);
-      onchainByMint.set(mint, info);
+    // Check cache
+    if (feedCache && feedCache.expiresAt > now) {
+      // Return cached data but adjust items to requested limit
+      const cachedResponse = { ...feedCache.data };
+      cachedResponse.items = cachedResponse.items.slice(0, limit);
+      cachedResponse.count = cachedResponse.items.length;
+      cachedResponse.sourceInfo.cacheHit = true;
+      
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify(cachedResponse),
+      };
     }
 
-    const items: TokenScored[] = launches.map((it) => {
-      const mint = typeof it?.mint === "string" ? it.mint.trim() : "";
-      const onchain = mint && onchainByMint.has(mint) ? onchainByMint.get(mint)! : null;
-      return scoreTokenV1(it, onchain);
-    });
+    // Fetch from Upstash
+    const rawItems = await fetchFromUpstash(limit);
 
-    const payload = {
+    // Score all items
+    const scoredItems = scoreFeed(rawItems, limit);
+
+    // Build response
+    const response: ScoredFeedResponse = {
       ok: true,
       version: VERSION,
       updatedUTC: new Date().toISOString(),
       sourceInfo: {
-        upstream: "upstash:pumpwatch:launches",
-        cacheTTLms: CACHE_TTL_MS,
-        rateLimit: { windowMs: RL_WINDOW_MS, max: RL_MAX },
-        rpc: SOLANA_RPC_URL.includes("api.mainnet-beta.solana.com") ? "public-default" : "custom",
-        onchainChecked: Math.min(30, launches.length),
+        provider: "upstash:pumpwatch:launches",
+        cacheHit: false,
+        cacheTTL: CACHE_TTL_MS,
+        itemsFromUpstash: rawItems.length,
       },
-      count: items.length,
-      items,
+      count: scoredItems.length,
+      items: scoredItems,
     };
 
-    CACHE = { at: now, payload };
-    return j(200, payload, { "x-cache": "MISS" });
-  } catch (e: any) {
-    return j(500, { ok: false, error: "server_error", message: String(e?.message || e), version: VERSION });
+    // Update cache with full dataset
+    const fullScoredItems = scoreFeed(rawItems, MAX_LIMIT);
+    feedCache = {
+      data: {
+        ...response,
+        items: fullScoredItems,
+        count: fullScoredItems.length,
+      },
+      expiresAt: now + CACHE_TTL_MS,
+    };
+
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify(response),
+    };
+  } catch (error) {
+    console.error("scored-feed error:", error);
+    
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({
+        ok: false,
+        version: VERSION,
+        error: `Failed to fetch feed: ${errorMessage}`,
+        items: [],
+        count: 0,
+      }),
+    };
   }
-}
+};
